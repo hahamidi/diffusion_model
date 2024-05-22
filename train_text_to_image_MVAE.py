@@ -526,6 +526,19 @@ def parse_args():
     return args
 
 
+from torch import nn
+
+class SuperModel(nn.Module):
+    def __init__(self, unet: UNet2DConditionModel, text_encoder: nn.Module) -> None:
+        super().__init__()
+        self.unet = unet
+        self.text_encoder = text_encoder
+
+    def forward(self, input_ids, noisy_latents, timesteps):
+        states = self.text_encoder(input_ids, return_dict=False)[0]
+        return self.unet(noisy_latents, timesteps, states, return_dict=False)[0]
+
+
 def main():
     args = parse_args()
 
@@ -595,15 +608,7 @@ def main():
         args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision
     )
 
-    def deepspeed_zero_init_disabled_context_manager():
-        """
-        returns either a context list that includes one that will disable zero.Init or an empty context list
-        """
-        deepspeed_plugin = AcceleratorState().deepspeed_plugin if accelerate.state.is_initialized() else None
-        if deepspeed_plugin is None:
-            return []
 
-        return [deepspeed_plugin.zero3_init_context_manager(enable=False)]
 
     # Currently Accelerate doesn't know how to handle multiple models under Deepspeed ZeRO stage 3.
     # For this to work properly all models must be run through `accelerate.prepare`. But accelerate
@@ -614,8 +619,7 @@ def main():
     # frozen models from being partitioned during `zero.Init` which gets called during
     # `from_pretrained` So CLIPTextModel and AutoencoderKL will not enjoy the parameter sharding
     # across multiple gpus and only UNet2DConditionModel will get ZeRO sharded.
-    with ContextManagers(deepspeed_zero_init_disabled_context_manager()):
-        text_encoder = CLIPTextModel.from_pretrained(
+    text_encoder = CLIPTextModel.from_pretrained(
             args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
         )
 
@@ -626,7 +630,7 @@ def main():
 
     # Freeze vae and text_encoder and set unet to trainable
 
-    text_encoder.requires_grad_(False)
+    text_encoder.train()
     unet.train()
 
     # Create EMA for the unet.
@@ -832,8 +836,9 @@ def main():
     )
 
     # Prepare everything with our `accelerator`.
-    unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        unet, optimizer, train_dataloader, lr_scheduler
+     
+     , optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        unet,optimizer, train_dataloader, lr_scheduler
     )
 
     if args.use_ema:
@@ -974,22 +979,11 @@ def main():
                 print("Noise time", time.time()-step_start_time)
                 step_start_time = time.time()
 
-                if args.dream_training:
-                    noisy_latents, target = compute_dream_and_update_latents(
-                        unet,
-                        noise_scheduler,
-                        timesteps,
-                        noise,
-                        noisy_latents,
-                        target,
-                        encoder_hidden_states,
-                        args.dream_detail_preservation,
-                    )
+
 
                 # Predict the noise residual and compute loss
                 model_pred = unet(noisy_latents, timesteps, encoder_hidden_states, return_dict=False)[0]
-                print("Model time", time.time()-step_start_time)
-                step_start_time = time.time()
+
 
                 if args.snr_gamma is None:
                     loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")

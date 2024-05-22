@@ -1,4 +1,4 @@
-./#!/usr/bin/env python
+
 # coding=utf-8
 # Copyright 2024 The HuggingFace Inc. team. All rights reserved.
 #
@@ -52,7 +52,23 @@ from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_
 from diffusers.utils.import_utils import is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
 import glob
+import torch.nn as nn
 
+
+class BinaryEncoder(nn.Module):
+    def __init__(self, input_dim=13, latent_dim=768):
+        super(BinaryEncoder, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 512),
+            nn.ReLU(),
+            nn.Linear(512, latent_dim),
+            nn.ReLU()
+        )
+
+    def forward(self, x):
+        return self.encoder(x)
 
 
 
@@ -66,6 +82,8 @@ import glob
 
 if is_wandb_available():
     import wandb
+
+
 
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
@@ -469,7 +487,7 @@ def parse_args():
     parser.add_argument(
         "--checkpointing_steps",
         type=int,
-        default=2000,
+        default=250,
         help=(
             "Save a checkpoint of the training state every X updates. These checkpoints are only suitable for resuming"
             " training using `--resume_from_checkpoint`."
@@ -524,6 +542,18 @@ def parse_args():
         args.non_ema_revision = args.revision
 
     return args
+
+
+
+class SuperModel(nn.Module):
+    def __init__(self, unet: UNet2DConditionModel, text_encoder: nn.Module) -> None:
+        super().__init__()
+        self.unet = unet
+        self.text_encoder = text_encoder
+    def forward(self, input_ids, noisy_latents, timesteps):
+
+
+
 
 
 def main():
@@ -619,6 +649,8 @@ def main():
             args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
         )
 
+    label_encoder = BinaryEncoder()
+
 
     unet = UNet2DConditionModel.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision
@@ -627,6 +659,7 @@ def main():
     # Freeze vae and text_encoder and set unet to trainable
 
     text_encoder.requires_grad_(False)
+    label_encoder.train()
     unet.train()
 
     # Create EMA for the unet.
@@ -731,12 +764,16 @@ def main():
             all_images = []
             all_text = []
             all_labels = []
-            with open("/local/home/hhamidi/codes/diffusers/examples/text_to_image/sentence.txt") as f:
+            with open("/local/home/hhamidi/t_dif/diffusers/examples/text_to_image/dataset/sentence.txt") as f:
                     all_text = f.readlines()
-            with open("/local/home/hhamidi/codes/diffusers/examples/text_to_image/img_path.txt") as f:
+            with open("/local/home/hhamidi/t_dif/diffusers/examples/text_to_image/dataset/img_path.txt") as f:
                     all_images = f.readlines()
-            with open("/local/home/hhamidi/codes/diffusers/examples/text_to_image/labels.txt") as f:
+            with open("/local/home/hhamidi/t_dif/diffusers/examples/text_to_image/dataset/labels.txt") as f:
                     all_labels = f.readlines()
+
+
+
+            all_labels = [[float(i) for i in label.replace('\n', '').split(',')] for label in all_labels]
             all_latents = [x.replace("\n","_latent.npy").replace("physionet.org","vae_latent") for x in all_images]   
 
 
@@ -792,6 +829,8 @@ def main():
 
     def preprocess_train(examples):
         examples["latent"] = [torch.tensor(np.load(latent_path)) for latent_path in examples["latentPath"]]
+        examples["all_labels"] = [torch.tensor(label) for label in examples["labels"]]
+
         # change it to tensor
         examples["input_ids"] = tokenize_captions(examples)
         return examples
@@ -804,9 +843,10 @@ def main():
 
     def collate_fn(examples):
         latent_values = torch.stack([example["latent"] for example in examples]).float()
+        labels_values = torch.stack([example["all_labels"] for example in examples]).float()
         # latent_values = latent_values.to(memory_format=torch.contiguous_format).float()
         input_ids = torch.stack([example["input_ids"] for example in examples])
-        return {"latent_values": latent_values, "input_ids": input_ids}
+        return {"latent_values": latent_values, "input_ids": input_ids, "labels": labels_values}
 
     # DataLoaders creation:
     train_dataloader = torch.utils.data.DataLoader(
@@ -851,6 +891,7 @@ def main():
 
     # Move text_encode and vae to gpu and cast to weight_dtype
     text_encoder.to(accelerator.device, dtype=weight_dtype)
+    label_encoder.to(accelerator.device, dtype=weight_dtype)
 
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
@@ -926,15 +967,15 @@ def main():
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(unet):
-                step_start_time = time.time()
+
                 # Convert images to latent space
                 latents = batch["latent_values"].half()
                 latents = latents * 0.18215
 
-                print("Latents time", time.time()-step_start_time)
 
 
-                step_start_time = time.time()
+
+
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(latents)
                 if args.noise_offset:
@@ -957,7 +998,18 @@ def main():
                     noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
                 # Get the text embedding for conditioning
-                encoder_hidden_states = text_encoder(batch["input_ids"], return_dict=False)[0]
+                # encoder_hidden_states = text_encoder(batch["input_ids"], return_dict=False)[0]
+                # print(encoder_hidden_states.shape)
+
+                # create a vecror of [B,1,768] for each label with BinaryEncoder
+                encoder_hidden_states = label_encoder(batch["labels"].half()).half()
+                # make it [B,1,768] 
+                encoder_hidden_states = encoder_hidden_states.unsqueeze(1)
+                
+
+                
+
+                
 
                 # Get the target for loss depending on the prediction type
                 if args.prediction_type is not None:
@@ -971,8 +1023,7 @@ def main():
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
-                print("Noise time", time.time()-step_start_time)
-                step_start_time = time.time()
+
 
                 if args.dream_training:
                     noisy_latents, target = compute_dream_and_update_latents(
@@ -988,8 +1039,7 @@ def main():
 
                 # Predict the noise residual and compute loss
                 model_pred = unet(noisy_latents, timesteps, encoder_hidden_states, return_dict=False)[0]
-                print("Model time", time.time()-step_start_time)
-                step_start_time = time.time()
+
 
                 if args.snr_gamma is None:
                     loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
@@ -1009,24 +1059,21 @@ def main():
                     loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
                     loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights
                     loss = loss.mean()
-                print("Loss time", time.time()-step_start_time)
-                step_start_time = time.time()
+
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
                 train_loss += avg_loss.item() / args.gradient_accumulation_steps
-                print("Gather time", time.time()-step_start_time)
-                step_start_time = time.time()
+
 
                 # Backpropagate
                 accelerator.backward(loss)
-                print("Backward time", time.time()-step_start_time)
-                step_start_time = time.time()
+
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
-                print("Optimizer time", time.time()-step_start_time)
+
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
@@ -1036,6 +1083,9 @@ def main():
                 global_step += 1
                 accelerator.log({"train_loss": train_loss}, step=global_step)
                 train_loss = 0.0
+                if global_step % args.checkpointing_steps == 0:
+                    # give 50 samples from model
+
 
                 if global_step % args.checkpointing_steps == 0:
                     if accelerator.is_main_process:
