@@ -55,6 +55,9 @@ import glob
 import torch.nn as nn
 
 
+
+
+
 class BinaryEncoder(nn.Module):
     def __init__(self, input_dim=13, latent_dim=768):
         super(BinaryEncoder, self).__init__()
@@ -1083,8 +1086,8 @@ def main():
                 global_step += 1
                 accelerator.log({"train_loss": train_loss}, step=global_step)
                 train_loss = 0.0
-                if global_step % args.checkpointing_steps == 0:
-                    # give 50 samples from model
+
+
 
 
                 if global_step % args.checkpointing_steps == 0:

@@ -360,8 +360,7 @@ class SuperModel(nn.Module):
         return self.unet(noisy_latents, timesteps, states, return_dict=False)[0]
     
 
-
-
+    
 def load_custom_dataset(args):
     if args.dataset_name:
         # Check if the dataset is one of the predefined ones
