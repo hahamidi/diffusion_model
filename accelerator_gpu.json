@@ -8,8 +8,6 @@
 
   "main_process_ip": null,
 
-  "main_process_port": 20655,
-
   "main_training_function": "main",
 
   "num_machines": 1,

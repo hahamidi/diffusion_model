@@ -51,8 +51,7 @@ def generate_and_save_embeddings(dataloader):
                 if not os.path.exists(dir_path):
                     os.makedirs(dir_path)
 
-                # Save the embeddings as a tensor to the specified path
-                torch.save(sentence_embedding, f'{save_paths[i]}.pt')
+
 
                 # To save as a numpy array, convert it first
                 sentence_embedding_np = sentence_embedding.numpy()
